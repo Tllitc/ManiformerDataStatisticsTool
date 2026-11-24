@@ -1,0 +1,15 @@
+统计工具开发文档.md
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 构建/发布产物
+dist/
+*.deb
+
+# 运行时数据（2.1G 扫描数据）
+data/
+
+# IDE 生成文件
+.trae/

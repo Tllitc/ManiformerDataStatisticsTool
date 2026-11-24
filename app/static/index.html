@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>UMI 数据统计工具</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <div class="brand-text">
+      <h1>UMI 数据统计工具</h1>
+      <span class="brand-sub" aria-hidden="true">LOCAL DATA CONSOLE</span>
+    </div>
+  </div>
+
+  <div class="scan-controls">
+    <select id="drive-select" title="选择数据盘">
+      <option value="">加载数据盘中…</option>
+    </select>
+    <input id="path-input" type="text" placeholder="或手动输入路径，如 /media/tc/…" autocomplete="off">
+    <label class="incremental-toggle" title="复用缓存跳过未变化的数据段；取消勾选则全量重扫">
+      <input type="checkbox" id="incremental-toggle" checked> 增量扫描
+    </label>
+    <button id="scan-btn" class="btn primary">扫描</button>
+    <span id="storage-alert" class="hidden"></span>
+  </div>
+
+  <div class="platform-controls">
+    <div id="auth-area" class="auth-area"></div>
+    <button id="sync-btn" class="btn">同步平台数据</button>
+    <span id="cache-status" class="muted cache-status"></span>
+  </div>
+</header>
+
+<div id="scan-progress" class="scan-progress hidden" aria-live="polite">
+  <div class="progress-row">
+    <span id="progress-text" class="progress-text"></span>
+    <span id="progress-path" class="progress-path muted"></span>
+  </div>
+  <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+</div>
+
+<nav class="tabs" id="tabs" role="tablist">
+  <button class="tab active" data-tab="overview" role="tab" id="tab-overview" aria-selected="true" aria-controls="panel-overview">概览</button>
+  <button class="tab" data-tab="devices" role="tab" id="tab-devices" aria-selected="false" aria-controls="panel-devices">设备</button>
+  <button class="tab" data-tab="tasks" role="tab" id="tab-tasks" aria-selected="false" aria-controls="panel-tasks">任务</button>
+  <button class="tab" data-tab="groups" role="tab" id="tab-groups" aria-selected="false" aria-controls="panel-groups">分组</button>
+  <button class="tab" data-tab="structure" role="tab" id="tab-structure" aria-selected="false" aria-controls="panel-structure">采集结构</button>
+  <button class="tab" data-tab="dates" role="tab" id="tab-dates" aria-selected="false" aria-controls="panel-dates">日期</button>
+  <button class="tab" data-tab="episodes" role="tab" id="tab-episodes" aria-selected="false" aria-controls="panel-episodes">明细</button>
+  <button class="tab" data-tab="anomalies" role="tab" id="tab-anomalies" aria-selected="false" aria-controls="panel-anomalies">异常</button>
+  <button class="tab" data-tab="storage" role="tab" id="tab-storage" aria-selected="false" aria-controls="panel-storage">存储</button>
+</nav>
+
+<main class="content">
+  <section id="panel-overview" class="panel active" role="tabpanel" aria-labelledby="tab-overview"></section>
+  <section id="panel-devices" class="panel" role="tabpanel" aria-labelledby="tab-devices"></section>
+  <section id="panel-tasks" class="panel" role="tabpanel" aria-labelledby="tab-tasks"></section>
+  <section id="panel-groups" class="panel" role="tabpanel" aria-labelledby="tab-groups"></section>
+  <section id="panel-structure" class="panel" role="tabpanel" aria-labelledby="tab-structure"></section>
+  <section id="panel-dates" class="panel" role="tabpanel" aria-labelledby="tab-dates"></section>
+  <section id="panel-episodes" class="panel" role="tabpanel" aria-labelledby="tab-episodes"></section>
+  <section id="panel-anomalies" class="panel" role="tabpanel" aria-labelledby="tab-anomalies"></section>
+  <section id="panel-storage" class="panel" role="tabpanel" aria-labelledby="tab-storage"></section>
+</main>
+
+<footer class="footer muted">本地服务 127.0.0.1:8765 · 数据只读 · 图表离线渲染<span id="app-version"></span></footer>
+
+<div id="login-modal" class="modal-mask hidden">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="login-title">
+    <h2 id="login-title">登录觅蜂平台</h2>
+    <form id="login-form">
+      <label class="field">租户
+        <input id="login-tenant" type="text" value="mego" autocomplete="off">
+      </label>
+      <label class="field">用户名
+        <input id="login-username" type="text" value="lixing" autocomplete="username">
+      </label>
+      <label class="field">密码
+        <input id="login-password" type="password" autocomplete="current-password" required>
+      </label>
+      <div id="login-error" class="error-box hidden"></div>
+      <div class="modal-actions">
+        <button type="button" id="login-cancel" class="btn">取消</button>
+        <button type="submit" id="login-submit" class="btn primary">登录</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+<script type="module" src="/static/js/main.js"></script>
+</body>
+</html>
