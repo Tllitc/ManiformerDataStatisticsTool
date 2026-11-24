@@ -22,11 +22,14 @@ import urllib.parse
 import urllib.request
 
 # ============================================================================
-# ！！！发布前请改为发布机外网 IP ！！！
-# 例如：DEFAULT_MANIFEST_URL = "http://<发布机IP>:8766/version.json"
-# 客户机也可通过 ~/.umi-stats-tool/update.json 的 manifest_url 字段覆盖此地址。
+# 更新源地址配置（仓库中不写入真实发布机地址）：
+# 1) 客户机 ~/.umi-stats-tool/update.json 的 manifest_url 字段（优先级最高）；
+# 2) 环境变量 UMI_MANIFEST_URL，例如 "http://<发布机IP>:8766/version.json"；
+# 3) 都未配置时使用下面的本机占位默认值（检查更新会静默失败，不影响启动）。
 # ============================================================================
-DEFAULT_MANIFEST_URL = "http://127.0.0.1:8766/version.json"
+DEFAULT_MANIFEST_URL = os.environ.get(
+    "UMI_MANIFEST_URL", "http://127.0.0.1:8766/version.json"
+)
 
 # 工具根目录（本文件位于 <根目录>/app/updater.py）
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
