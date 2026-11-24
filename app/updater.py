@@ -77,6 +77,34 @@ def get_manifest_url():
     return DEFAULT_MANIFEST_URL
 
 
+def _persist_manifest_url():
+    """更新成功后，若客户机未配置 manifest_url，把当前生效地址写入 update.json。
+
+    保证从带硬编码地址的旧版本升级到新版本后，后续更新仍能找到更新源；
+    已有有效配置时不改动，写入失败不影响更新结果。
+    """
+    cfg_path = os.path.join(_state_dir(), "update.json")
+    cfg = {}
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            cfg = loaded
+    except (OSError, ValueError):
+        pass
+    url = cfg.get("manifest_url")
+    if isinstance(url, str) and url.strip():
+        return
+    cfg["manifest_url"] = get_manifest_url()
+    try:
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        _log("已写入更新源配置：%s" % cfg["manifest_url"])
+    except OSError:
+        pass
+
+
 def read_local_version():
     """读取工具根目录 VERSION，缺失/不可读返回 "0.0.0"。"""
     try:
@@ -249,6 +277,9 @@ def apply_update(manifest, restart=True):
         msg = "已更新到 v%s" % manifest.get("version")
         _log(msg)
         print(msg, flush=True)
+
+        # 8) 未配置更新源的客户机：固化当前生效地址，保证后续版本仍可自动更新
+        _persist_manifest_url()
     except Exception as exc:
         msg = "更新失败：%s" % exc
         _log(msg)
@@ -269,7 +300,7 @@ def apply_update(manifest, restart=True):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if restart:
-        # 8) 重启当前进程（cwd 不变）
+        # 9) 重启当前进程（cwd 不变）
         os.execv(sys.executable, [sys.executable] + sys.argv)
     return True
 
