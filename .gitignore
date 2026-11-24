@@ -6,6 +6,7 @@ __pycache__/
 
 # 构建/发布产物
 dist/
+rustdesk-dist/
 *.deb
 
 # 运行时数据（2.1G 扫描数据）

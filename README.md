@@ -132,7 +132,21 @@ python3 publish.py --no-bump          # 按当前 VERSION 重新发布
 python3 publish.py --serve            # 在本机 8766 端口提供只读更新源
 ```
 
-客户机更新源地址可在 `~/.umi-stats-tool/update.json` 的 `manifest_url` 字段覆盖，指向发布机的 `version.json`。
+发布时会自动把 `deploy/install.sh` 与 `deploy/icon.svg` 同步到 `dist/`，由 8766 更新源一并托管。客户机更新源地址可在 `~/.umi-stats-tool/update.json` 的 `manifest_url` 字段覆盖，指向发布机的 `version.json`。
+
+## 一键部署到目标 Ubuntu（在线）
+
+目标机为 Ubuntu 桌面环境（Python 3.8+，能访问发布机 8766 端口）。发布机先执行 `python3 publish.py` 与 `python3 publish.py --serve`（必要时 `sudo ufw allow 8766/tcp`），然后在目标机执行一条命令：
+
+```bash
+curl -s http://<发布机IP>:8766/install.sh | bash -s -- --source http://<发布机IP>:8766
+```
+
+安装器（[deploy/install.sh](deploy/install.sh)）自动完成：环境与架构检查 → `requests` 依赖安装（apt → pip 两级降级）→ 下载更新包并 SHA-256 校验 → 旧版本备份后安装到 `~/umi-stats-tool/` → 写入更新源配置（对接启动自动更新）→ 创建应用菜单图标与 SVG 图标 → HTTP 接口自检。
+
+- 幂等：重复执行即重新部署，旧版本保留在 `~/umi-stats-tool.bak/`
+- 用户数据始终在 `~/.umi-stats-tool/`，与程序目录分离
+- 卸载（保留数据）：命令末尾加 `--uninstall`；连数据一并删除：加 `--purge`
 
 ## 技术栈
 

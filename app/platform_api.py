@@ -8,6 +8,7 @@
 import base64
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 
@@ -19,8 +20,15 @@ DEFAULT_CLIENT_ID = "7fd3ac5466214bff6252"
 STATE_DIR = os.path.expanduser("~/.umi-stats-tool")
 TOKEN_PATH = os.path.join(STATE_DIR, "token.json")
 CACHE_PATH = os.path.join(STATE_DIR, "platform_cache.json")
+TASK_CENTER_CACHE_PATH = os.path.join(STATE_DIR, "task_center_cache.json")
+TASK_CENTER_CACHE_VERSION = 1
+TASK_CENTER_PAGE_SIZE = 500
+JOB_PAGE_SIZE = 200
+EPISODE_BATCH = 20
 TIMEOUT = 30
 PAGE_SIZE = 100
+
+_TASK_DATE_RE = re.compile(r"-(\d{8})$")
 
 # join_tasks 附加的平台字段（未命中时全部置 None）
 _JOIN_FIELDS = (
@@ -217,6 +225,369 @@ def _aggregate(submissions):
     return by_task
 
 
+# ------------------------------------------------ 任务中心（/api/v1/collect/*）
+
+class TaskCenterError(Exception):
+    """任务中心同步错误；is_permission=True 表示 40001 无权限（不写缓存）。"""
+
+    def __init__(self, message, is_permission=False):
+        super().__init__(message)
+        self.is_permission = is_permission
+
+
+def _is_not_authorized(err):
+    return isinstance(err, str) and "40001" in err and "Not Authorized" in err
+
+
+def load_task_center_cache():
+    """读取任务中心缓存；文件缺失/损坏/版本不符一律返回 None。"""
+    try:
+        with open(TASK_CENTER_CACHE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if (isinstance(data, dict)
+            and data.get("version") == TASK_CENTER_CACHE_VERSION
+            and isinstance(data.get("jobs"), dict)):
+        return data
+    return None
+
+
+def _write_task_center_cache(cache):
+    """tmp + os.replace 原子写入。"""
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp_path = "%s.tmp%d" % (TASK_CENTER_CACHE_PATH, os.getpid())
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, TASK_CENTER_CACHE_PATH)
+
+
+def _extract_local_dates(scan_result):
+    """从扫描结果 episodes 的 create_time 前 10 位提取去重日期集合。"""
+    dates = set()
+    if not isinstance(scan_result, dict):
+        return dates
+    for ep in scan_result.get("episodes") or []:
+        if not isinstance(ep, dict):
+            continue
+        create_time = ep.get("create_time")
+        if isinstance(create_time, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", create_time[:10]):
+            dates.add(create_time[:10])
+    return dates
+
+
+def _task_date_suffix(name):
+    """任务名 -YYYYMMDD 后缀 → YYYY-MM-DD；无后缀/非法日期返回 None。"""
+    if not isinstance(name, str):
+        return None
+    match = _TASK_DATE_RE.search(name)
+    if not match:
+        return None
+    digits = match.group(1)
+    try:
+        return datetime.strptime(digits, "%Y%m%d").strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _iter_task_all_pages(token):
+    """分页拉 /collect/task/all，逐页产出 (page_items, total)；按 id 降序。"""
+    page_num = 1
+    total = None
+    seen = 0
+    while True:
+        data, err = _api_get(
+            "/api/v1/collect/task/all",
+            token,
+            params={"page_num": page_num, "page_size": TASK_CENTER_PAGE_SIZE},
+        )
+        if err:
+            if _is_not_authorized(err):
+                raise TaskCenterError(
+                    "当前账号无任务中心访问权限（40001 Not Authorized），"
+                    "请联系管理员开通后重试", True)
+            raise TaskCenterError("拉取任务列表失败：%s" % err)
+        if not isinstance(data, dict) or not isinstance(data.get("list"), list):
+            raise TaskCenterError("拉取任务列表失败：平台返回格式异常")
+        items = data["list"]
+        if isinstance(data.get("total"), int):
+            total = data["total"]
+        yield items, total
+        if not items:
+            return
+        seen += len(items)
+        if len(items) < TASK_CENTER_PAGE_SIZE:
+            return
+        if total is not None and seen >= total:
+            return
+        page_num += 1
+
+
+def _iter_task_all(token):
+    """逐个产出任务 {id, name}。"""
+    for items, _total in _iter_task_all_pages(token):
+        for item in items:
+            if isinstance(item, dict) and item.get("id") is not None:
+                yield item
+
+
+def _fetch_jobs(token, task_id):
+    """分页拉某任务的全部作业，返回作业列表（40001 由上层识别处理）。"""
+    jobs = []
+    page_num = 1
+    total = None
+    while True:
+        data, err = _api_get(
+            "/api/v1/collect/task/job",
+            token,
+            params={"task_id": task_id,
+                    "page_num": page_num,
+                    "page_size": JOB_PAGE_SIZE},
+        )
+        if err:
+            if _is_not_authorized(err):
+                raise TaskCenterError(
+                    "当前账号无任务中心访问权限（40001 Not Authorized），"
+                    "请联系管理员开通后重试", True)
+            raise TaskCenterError("拉取任务 %s 的作业失败：%s" % (task_id, err))
+        if not isinstance(data, dict) or not isinstance(data.get("list"), list):
+            raise TaskCenterError("拉取任务 %s 的作业失败：平台返回格式异常" % task_id)
+        items = data["list"]
+        if isinstance(data.get("total"), int):
+            total = data["total"]
+        jobs.extend(items)
+        if not items or len(items) < JOB_PAGE_SIZE:
+            break
+        if total is not None and len(jobs) >= total:
+            break
+        page_num += 1
+    return jobs
+
+
+def _fetch_device_type_name(token, task_id):
+    """取任务详情中的设备型号名；失败返回 None。"""
+    data, err = _api_get(
+        "/api/v1/collect/task/detail",
+        token,
+        params={"task_id": task_id},
+    )
+    if err:
+        if _is_not_authorized(err):
+            raise TaskCenterError(
+                "当前账号无任务中心访问权限（40001 Not Authorized），"
+                "请联系管理员开通后重试", True)
+        return None
+    if isinstance(data, dict):
+        name = data.get("device_type_name")
+        return name if isinstance(name, str) and name else None
+    return None
+
+
+def _enrich_local_jobs(token, scan_result, jobs_index, warnings):
+    """对本地扫描命中且未 enrich 的作业补全采集人与云端回传状态。"""
+    local_uuids = set()
+    for ep in (scan_result or {}).get("episodes") or []:
+        if isinstance(ep, dict) and ep.get("job_uuid"):
+            local_uuids.add(ep["job_uuid"])
+    targets = sorted(
+        uuid for uuid in local_uuids
+        if uuid in jobs_index and jobs_index[uuid].get("enriched") is not True
+    )
+    enriched_count = 0
+
+    # 采集人：assignment/stat 的 display_name 去重
+    for uuid in targets:
+        job = jobs_index[uuid]
+        try:
+            data, err = _api_get(
+                "/api/v1/collect/task/job/assignment/stat",
+                token,
+                params={"job_id": job["job_id"]},
+            )
+            if err:
+                if _is_not_authorized(err):
+                    raise TaskCenterError(
+                        "当前账号无任务中心访问权限（40001 Not Authorized），"
+                        "请联系管理员开通后重试", True)
+                warnings.append(
+                    "作业 %s 采集人信息获取失败：%s" % (job["job_id"], err))
+                job["collectors"] = []
+            else:
+                names = []
+                entries = data.get("list") if isinstance(data, dict) else None
+                for entry in entries or []:
+                    name = entry.get("display_name") if isinstance(entry, dict) else None
+                    if name and name not in names:
+                        names.append(name)
+                job["collectors"] = names
+        except requests.RequestException as exc:
+            warnings.append("作业 %s 采集人信息获取失败：%s"
+                            % (job["job_id"], _network_error(exc)))
+            job["collectors"] = []
+
+    # 云端回传状态：job/episodes 按 EPISODE_BATCH 分批
+    for start in range(0, len(targets), EPISODE_BATCH):
+        batch = targets[start:start + EPISODE_BATCH]
+        id_to_uuid = {str(jobs_index[uuid]["job_id"]): uuid for uuid in batch}
+        try:
+            data, err = _api_get(
+                "/api/v1/collect/task/job/episodes",
+                token,
+                params={"job_ids": json.dumps([int(jid) for jid in id_to_uuid])},
+            )
+            if err:
+                if _is_not_authorized(err):
+                    raise TaskCenterError(
+                        "当前账号无任务中心访问权限（40001 Not Authorized），"
+                        "请联系管理员开通后重试", True)
+                warnings.append("云端 episode 状态获取失败（%d 个作业）：%s"
+                                % (len(batch), err))
+                for uuid in batch:
+                    jobs_index[uuid]["cloud_status"] = "unknown"
+            else:
+                mapping = data.get("data") if isinstance(data, dict) else None
+                mapping = mapping if isinstance(mapping, dict) else {}
+                for job_id_str, uuid in id_to_uuid.items():
+                    episodes = mapping.get(job_id_str)
+                    if isinstance(episodes, list) and episodes:
+                        jobs_index[uuid]["cloud_status"] = "registered"
+                    else:
+                        jobs_index[uuid]["cloud_status"] = "not_uploaded"
+        except requests.RequestException as exc:
+            warnings.append("云端 episode 状态获取失败（%d 个作业）：%s"
+                            % (len(batch), _network_error(exc)))
+            for uuid in batch:
+                jobs_index[uuid]["cloud_status"] = "unknown"
+
+    for uuid in targets:
+        jobs_index[uuid]["enriched"] = True
+        enriched_count += 1
+    return enriched_count
+
+
+def sync_task_center(scan_result):
+    """按本地扫描日期增量同步任务中心，构建并持久化 job_uuid 索引。"""
+    state = _read_token()
+    if not state or not state.get("token"):
+        return {"ok": False, "error": "未登录"}
+    if time.time() >= (state.get("expires_at") or 0):
+        return {"ok": False, "error": "登录已过期，请重新登录"}
+    token = state["token"]
+
+    if not isinstance(scan_result, dict) or not scan_result.get("episodes"):
+        return {"ok": False, "error": "请先扫描数据盘后再同步任务中心"}
+
+    local_dates = _extract_local_dates(scan_result)
+    if not local_dates:
+        return {"ok": False, "error": "请先扫描数据盘后再同步任务中心"}
+
+    cache = load_task_center_cache() or {}
+    cached_dates = set(cache.get("dates") or [])
+    new_dates = local_dates - cached_dates
+    jobs_index = dict(cache.get("jobs") or {})
+    warnings = []
+    tasks_scanned = 0
+    jobs_indexed = 0
+
+    try:
+        if new_dates:
+            min_date = min(new_dates)
+            matched_tasks = []
+            # 任务按 id 降序、日期后缀随 id 变老：翻到整页后缀日期都早于
+            # 目标日期最小值即可停止；无后缀任务不影响翻页，total 兜底终止。
+            for items, total in _iter_task_all_pages(token):
+                page_dates = []
+                for item in items:
+                    suffix = _task_date_suffix(item.get("name"))
+                    if suffix is None:
+                        continue
+                    page_dates.append(suffix)
+                    if suffix in new_dates:
+                        matched_tasks.append(item)
+                if page_dates and all(d < min_date for d in page_dates):
+                    break
+
+            for task in matched_tasks:
+                task_id = task["id"]
+                task_name = task.get("name")
+                try:
+                    device_type_name = _fetch_device_type_name(token, task_id)
+                except TaskCenterError:
+                    raise
+                except requests.RequestException as exc:
+                    warnings.append("任务 %s 详情获取失败：%s"
+                                    % (task_id, _network_error(exc)))
+                    device_type_name = None
+                if device_type_name is None:
+                    warnings.append("任务 %s（%s）设备型号获取失败，已置空"
+                                    % (task_id, task_name))
+                try:
+                    remote_jobs = _fetch_jobs(token, task_id)
+                except TaskCenterError:
+                    raise
+                except requests.RequestException as exc:
+                    warnings.append("任务 %s（%s）作业拉取失败：%s"
+                                    % (task_id, task_name, _network_error(exc)))
+                    continue
+                tasks_scanned += 1
+                for job in remote_jobs:
+                    if not isinstance(job, dict) or not job.get("uuid"):
+                        continue
+                    jobs_index[job["uuid"]] = {
+                        "job_id": job.get("id"),
+                        "task_id": task_id,
+                        "task_name": task_name,
+                        "job_name": job.get("name"),
+                        "status": job.get("status"),
+                        "is_assign": job.get("is_assign"),
+                        "is_finish": job.get("is_finish"),
+                        "progress": job.get("progress"),
+                        "created_at": job.get("created_at"),
+                        "device_type_name": device_type_name,
+                        "collectors": [],
+                        "cloud_status": None,
+                        "enriched": False,
+                    }
+                    jobs_indexed += 1
+
+        # 即使没有新日期，也要对本地命中但未 enrich 的作业补全
+        enriched = _enrich_local_jobs(token, scan_result, jobs_index, warnings)
+    except TaskCenterError as exc:
+        if exc.is_permission:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "warnings": [str(exc)],
+            }
+        return {"ok": False, "error": str(exc), "warnings": warnings}
+    except requests.RequestException as exc:
+        return {"ok": False, "error": _network_error(exc), "warnings": warnings}
+
+    synced_at = datetime.now(timezone.utc).isoformat()
+    new_cache = {
+        "version": TASK_CENTER_CACHE_VERSION,
+        "synced_at": synced_at,
+        "dates": sorted(cached_dates | local_dates),
+        "jobs": jobs_index,
+        "warnings": warnings,
+    }
+    try:
+        _write_task_center_cache(new_cache)
+    except OSError as exc:
+        return {"ok": False, "error": "无法写入任务中心缓存：%s" % exc,
+                "warnings": warnings}
+
+    return {
+        "ok": True,
+        "synced_dates": sorted(new_dates),
+        "tasks_scanned": tasks_scanned,
+        "jobs_indexed": jobs_indexed,
+        "enriched": enriched,
+        "warnings": warnings,
+        "synced_at": synced_at,
+    }
+
+
 # ---------------------------------------------------------------- 对外接口
 
 def login(username, password, tenant=DEFAULT_TENANT):
@@ -405,6 +776,25 @@ def platform_status():
     if cache is not None:
         result["synced_at"] = cache.get("synced_at")
         result["submissions_count"] = len(cache.get("submissions") or [])
+
+    tc_cache = load_task_center_cache()
+    if isinstance(tc_cache, dict):
+        tc_warnings = tc_cache.get("warnings") or []
+        result["task_center"] = {
+            "cached": True,
+            "synced_at": tc_cache.get("synced_at"),
+            "dates": list(tc_cache.get("dates") or []),
+            "jobs_count": len(tc_cache.get("jobs") or {}),
+            "last_warning": tc_warnings[-1] if tc_warnings else None,
+        }
+    else:
+        result["task_center"] = {
+            "cached": False,
+            "synced_at": None,
+            "dates": [],
+            "jobs_count": 0,
+            "last_warning": None,
+        }
     return result
 
 
@@ -412,34 +802,81 @@ def load_cache():
     return _read_json(CACHE_PATH)
 
 
+def _join_task_center(row, tc_jobs):
+    """任务中心 job_uuid 命中分支，返回填充好的行（已 dict 复制）。"""
+    matched = [tc_jobs[uuid] for uuid in (row.get("job_uuids") or [])
+               if uuid in tc_jobs]
+    task_name = next((j.get("task_name") for j in matched if j.get("task_name")), None)
+    collectors = []
+    for job in matched:
+        for name in job.get("collectors") or []:
+            if name and name not in collectors:
+                collectors.append(name)
+    device_type_names = []
+    for job in matched:
+        name = job.get("device_type_name")
+        if name and name not in device_type_names:
+            device_type_names.append(name)
+    created_ats = [j.get("created_at") for j in matched if j.get("created_at")]
+    statuses = [j.get("cloud_status") for j in matched]
+    if "registered" in statuses:
+        cloud_status = "registered"
+    elif "not_uploaded" in statuses:
+        cloud_status = "not_uploaded"
+    else:
+        cloud_status = "unknown"
+    row["task_name"] = task_name
+    row["collectors"] = collectors
+    row["project_name"] = None
+    row["device_type_names"] = device_type_names
+    row["expect_duration_seconds"] = None
+    row["platform_created_at"] = min(created_ats) if created_ats else None
+    row["match_source"] = "task_center"
+    row["cloud_status"] = cloud_status
+    return row
+
+
 def join_tasks(by_task, cache):
-    """按 task_uuid 将平台缓存关联到统计任务列表，返回新列表（不改原数据）。"""
+    """关联平台信息到统计任务列表，返回新列表（不改原数据、不发网络请求）。
+
+    匹配顺序：① 任务中心 job_uuid → ② 表单 task_uuid → ③ 置空。
+    cache 为表单缓存与任务中心缓存（cache["task_center"]）合并后的 dict。
+    """
     cache = cache if isinstance(cache, dict) else {}
     by_uuid = cache.get("by_task_uuid") or {}
     device_types = cache.get("device_types") or {}
     project_tags = cache.get("project_tags") or {}
+    tc_cache = cache.get("task_center")
+    tc_jobs = tc_cache.get("jobs") if isinstance(tc_cache, dict) else None
+    tc_jobs = tc_jobs if isinstance(tc_jobs, dict) else {}
     joined = []
     for item in by_task:
         row = dict(item)
-        info = by_uuid.get(row.get("task_uuid"))
-        if isinstance(info, dict):
-            row["task_name"] = info.get("task_name")
-            row["collectors"] = list(info.get("collectors") or [])
-            project_tag_id = info.get("project_tag_id")
-            row["project_name"] = (
-                project_tags.get(str(project_tag_id))
-                if project_tag_id not in (None, "")
-                else None
-            )
-            row["device_type_names"] = [
-                device_types[str(d)]
-                for d in (info.get("device_type_ids") or [])
-                if str(d) in device_types
-            ]
-            row["expect_duration_seconds"] = info.get("expect_duration_seconds")
-            row["platform_created_at"] = info.get("platform_created_at")
+        if tc_jobs and any(uuid in tc_jobs for uuid in (row.get("job_uuids") or [])):
+            row = _join_task_center(row, tc_jobs)
         else:
-            for field in _JOIN_FIELDS:
-                row[field] = None
+            info = by_uuid.get(row.get("task_uuid"))
+            if isinstance(info, dict):
+                row["task_name"] = info.get("task_name")
+                row["collectors"] = list(info.get("collectors") or [])
+                project_tag_id = info.get("project_tag_id")
+                row["project_name"] = (
+                    project_tags.get(str(project_tag_id))
+                    if project_tag_id not in (None, "")
+                    else None
+                )
+                row["device_type_names"] = [
+                    device_types[str(d)]
+                    for d in (info.get("device_type_ids") or [])
+                    if str(d) in device_types
+                ]
+                row["expect_duration_seconds"] = info.get("expect_duration_seconds")
+                row["platform_created_at"] = info.get("platform_created_at")
+                row["match_source"] = "form"
+            else:
+                for field in _JOIN_FIELDS:
+                    row[field] = None
+                row["match_source"] = "none"
+            row["cloud_status"] = None
         joined.append(row)
     return joined

@@ -391,7 +391,8 @@ def update_status():
 _EXPORT_COLUMNS = {
     "devices": ["device_id", "episodes", "seconds", "hm", "task_types", "roles"],
     "tasks": ["task_uuid", "task_name", "collectors", "episodes", "seconds", "hm",
-              "devices", "groups", "expect_duration_seconds", "project_name"],
+              "devices", "groups", "expect_duration_seconds", "project_name",
+              "match_source", "cloud_status"],
     "groups": ["group_id", "episodes", "seconds", "hm", "devices", "task_uuid", "bytes"],
     "dates": ["date", "episodes", "seconds", "hm"],
     "episodes": ["path", "device_id", "task_uuid", "group_id", "seconds", "hm",
@@ -428,11 +429,19 @@ def _anomaly_rows(anomalies):
     return rows
 
 
+def _joined_cache():
+    """合并表单缓存与任务中心缓存，供 join_tasks 使用。"""
+    cache = platform_api.load_cache() or {}
+    cache = dict(cache)
+    cache["task_center"] = platform_api.load_task_center_cache()
+    return cache
+
+
 def _export_rows(scan, export_type):
     if export_type == "devices":
         return scan.get("by_device") or []
     if export_type == "tasks":
-        return platform_api.join_tasks(scan.get("by_task") or [], platform_api.load_cache())
+        return platform_api.join_tasks(scan.get("by_task") or [], _joined_cache())
     if export_type == "groups":
         return scan.get("by_group") or []
     if export_type == "dates":
@@ -558,7 +567,7 @@ class Handler(BaseHTTPRequestHandler):
             joined = None
             if scan is not None:
                 joined = platform_api.join_tasks(
-                    scan.get("by_task") or [], platform_api.load_cache()
+                    scan.get("by_task") or [], _joined_cache()
                 )
             self._send_json({
                 "scan": scan,
@@ -602,6 +611,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(platform_api.logout())
         elif path == "/api/platform/sync":
             self._send_json(platform_api.sync())
+        elif path == "/api/platform/sync-task-center":
+            # 统一 200 返回 body，前端按 ok 判定失败（未扫描/登录失效/无权限同理）
+            self._send_json(platform_api.sync_task_center(get_result()))
         elif path.startswith("/api/"):
             self._send_json({"ok": False, "error": "未知接口：%s" % path}, 404)
         else:

@@ -25,7 +25,11 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DIST_DIR = os.path.join(ROOT, "dist")
+DEPLOY_DIR = os.path.join(ROOT, "deploy")
 DEFAULT_PORT = 8766
+
+# 随发布同步到 dist/ 的在线安装资源（经 8766 更新源直接托管）
+DEPLOY_RESOURCES = ("install.sh", "icon.svg")
 
 
 def detect_ip():
@@ -131,12 +135,24 @@ def publish(notes, ver):
         json.dump(manifest, f, ensure_ascii=False, indent=2)
         f.write("\n")
 
+    # 同步在线安装资源到 dist/，使更新源可直接托管 install.sh / icon.svg
+    synced = []
+    for name in DEPLOY_RESOURCES:
+        src = os.path.join(DEPLOY_DIR, name)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(DIST_DIR, name))
+            synced.append(name)
+
     ip = detect_ip()
     print("发布完成：v%s" % ver)
     print("  更新包：%s" % pkg_path)
     print("  清单：  %s" % manifest_path)
+    if synced:
+        print("  安装资源：%s" % "、".join(synced))
     print("  sha256：%s" % digest)
     print("客户机清单地址：http://%s:%d/version.json" % (ip, DEFAULT_PORT))
+    print("目标机一键安装：curl -s http://%s:%d/install.sh | bash -s -- --source http://%s:%d"
+          % (ip, DEFAULT_PORT, ip, DEFAULT_PORT))
     print("启动更新源服务：python3 publish.py --serve --port %d" % DEFAULT_PORT)
 
 
