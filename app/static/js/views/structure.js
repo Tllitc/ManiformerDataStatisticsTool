@@ -37,6 +37,19 @@ function collectorHTML(info, userIds) {
   return unsynced();
 }
 
+/* 任务中心命中行的云端回传状态徽章；cloud_status 缺失时按未知处理；form/none 不输出 */
+function cloudBadge(info) {
+  if (!info || info.match_source !== 'task_center') return '';
+  switch (info.cloud_status) {
+    case 'not_uploaded':
+      return ' <span class="badge badge-cloud-warn">云端未回传</span>';
+    case 'registered':
+      return ' <span class="badge badge-cloud-ok">云端已登记</span>';
+    default:
+      return ' <span class="badge">云端状态未知</span>';
+  }
+}
+
 function miniBar(share, colorIndex) {
   var w = Math.min(100, Math.max(0, share));
   return '<span class="struct-mini-bar" title="占比 ' + share.toFixed(1) + '%">' +
@@ -133,7 +146,7 @@ export function renderStructure() {
     var name = (info && info.task_name) || '';
     var userIds = Object.keys(userIdsByTask[t.task_uuid] || {}).sort();
     html += '<details class="struct-task" data-ti="' + ti + '"' + (st.tasks.length === 1 ? ' open' : '') + '><summary>' +
-      (name ? '<span class="struct-task-name">' + esc(name) + '</span>' : '') +
+      (name ? '<span class="struct-task-name">' + esc(name) + cloudBadge(info) + '</span>' : '') +
       '<span class="mono uuid" title="' + esc(t.task_uuid) + '">' + esc(trunc(t.task_uuid, 34)) + '</span>' +
       collectorHTML(info, userIds) +
       '<span class="muted struct-agg">' + fmtNum(t.group_count) + ' 分组 · ' +

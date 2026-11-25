@@ -6,6 +6,19 @@ import { emptyHint, exportBar, tableHTML, unsynced } from '../ui.js';
 
 function $(sel) { return document.querySelector(sel); }
 
+/* 任务中心命中行的云端回传状态徽章；match_source=task_center 且 cloud_status 缺失时按未知处理 */
+function cloudBadge(t) {
+  if (t.match_source !== 'task_center') return '';
+  switch (t.cloud_status) {
+    case 'not_uploaded':
+      return ' <span class="badge badge-cloud-warn">云端未回传</span>';
+    case 'registered':
+      return ' <span class="badge badge-cloud-ok">云端已登记</span>';
+    default:
+      return ' <span class="badge">云端状态未知</span>';
+  }
+}
+
 export function renderTasks() {
   var p = $('#panel-tasks');
   var s = state.scan;
@@ -16,7 +29,7 @@ export function renderTasks() {
     var deviceTypes = t.device_type_names || [];
     var expect = t.expect_duration_seconds;
     return [
-      t.task_name ? esc(t.task_name) : unsynced(),
+      (t.task_name ? esc(t.task_name) : unsynced()) + cloudBadge(t),
       '<span class="mono uuid" title="' + esc(t.task_uuid) + '">' + esc(trunc(t.task_uuid || '—', 34)) + '</span>',
       collectors.length ? esc(collectors.join('、')) : unsynced(),
       t.project_name ? esc(t.project_name) : unsynced(),

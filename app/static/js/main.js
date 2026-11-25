@@ -117,6 +117,24 @@ function renderCacheStatus() {
     el.textContent = '平台数据未同步';
     el.title = '';
   }
+  renderTaskCenterStatus();
+}
+
+function renderTaskCenterStatus() {
+  var el = $('#task-center-status');
+  var tc = state.platform && state.platform.task_center;
+  if (!tc || !tc.cached) {
+    el.textContent = '任务中心未同步';
+    el.title = '';
+    return;
+  }
+  var dates = tc.dates || [];
+  el.textContent = '任务中心 ' + fmtNum(tc.jobs_count) + ' 作业 · ' + fmtNum(dates.length) +
+    ' 个日期' + (tc.synced_at ? ' · ' + fmtISO(tc.synced_at) : '') +
+    (tc.last_warning ? ' · 有警告' : '');
+  var title = '已缓存日期：' + (dates.length ? dates.join('、') : '无');
+  if (tc.last_warning) title += '\n最后警告：' + tc.last_warning;
+  el.title = title;
 }
 
 function renderProgress() {
@@ -279,6 +297,32 @@ function onSync() {
   });
 }
 
+/* 任务中心同步可能耗时数分钟：fetch 不设超时；后端恒返回 HTTP 200，ok:false 由 api() 抛错 */
+function onSyncTaskCenter() {
+  if (!state.auth || !state.auth.logged_in) {
+    toast('请先登录平台', 'error');
+    openLoginModal();
+    return;
+  }
+  var btn = $('#sync-task-center-btn');
+  btn.disabled = true;
+  btn.textContent = '同步中…';
+  postJSON('/api/platform/sync-task-center').then(function (r) {
+    toast('任务中心同步完成：' + fmtNum((r.synced_dates || []).length) + ' 个日期 · ' +
+      fmtNum(r.jobs_indexed) + ' 个作业索引 · ' + fmtNum(r.enriched) + ' 个作业补全');
+    var warnings = r.warnings || [];
+    if (warnings.length) {
+      toast('同步警告 ' + fmtNum(warnings.length) + ' 条：' + warnings[0], 'error');
+    }
+    return Promise.all([refreshPlatform(), loadStats()]);
+  }).catch(function (e) {
+    toast('任务中心同步失败：' + e.message, 'error');
+  }).then(function () {
+    btn.disabled = false;
+    btn.textContent = '同步任务中心';
+  });
+}
+
 /* ---------------------------------------------------------------- Tab 切换 */
 
 var RENDERERS = {
@@ -327,6 +371,7 @@ function bindEvents() {
     if (ev.key === 'Enter') onScanClick();
   });
   $('#sync-btn').addEventListener('click', onSync);
+  $('#sync-task-center-btn').addEventListener('click', onSyncTaskCenter);
   $('#tabs').addEventListener('click', function (ev) {
     var btn = ev.target.closest('.tab');
     if (btn) switchTab(btn.getAttribute('data-tab'));

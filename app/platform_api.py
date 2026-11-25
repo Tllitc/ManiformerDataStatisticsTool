@@ -236,7 +236,65 @@ class TaskCenterError(Exception):
 
 
 def _is_not_authorized(err):
+    """识别任务中心 40001 权限错误（账号级，需终止同步）。
+
+    任务中心调用经 _tc_get 返回 (code, message) 元组；真实回包为
+    {"code": 40001, "message": "验证失败: Not Authorized"}，code 才是可靠判据，
+    message 文案不含 40001，不能只靠字符串匹配。
+    """
+    if isinstance(err, tuple) and len(err) == 2:
+        code, message = err
+        return code == 40001 or (
+            isinstance(message, str) and "Not Authorized" in message
+        )
     return isinstance(err, str) and "40001" in err and "Not Authorized" in err
+
+
+# 资源级不可见（Data-Collector 可在 task/all 看到他人任务，但无权打开）：
+# detail 返回 40401 资源不存在、job 返回 40005 权限不足，属正常权限边界，静默跳过。
+_INVISIBLE_CODES = (40401, 40005)
+
+
+def _is_invisible(err):
+    return isinstance(err, tuple) and len(err) == 2 and err[0] in _INVISIBLE_CODES
+
+
+def _add_warning(warnings, message, cap=20):
+    """警告去重并封顶：最多 cap 条不同警告 + 1 条省略提示，共 cap+1 条。"""
+    if len(warnings) > cap:  # 已追加省略提示，后续全部忽略
+        return
+    if message not in warnings:
+        warnings.append(message)
+    if len(warnings) == cap:
+        warnings.append("其余同类问题已省略，详见服务日志")
+
+
+def _tc_get(path, token, params=None):
+    """任务中心专用 GET：同 _api_get，但业务错误返回 (code, message) 元组，
+
+    保留原始 code 以便 _is_not_authorized 识别 40001（_api_get 会丢弃 code，
+    而平台 message 为「验证失败: Not Authorized」不含 40001）。
+    成功返回 (data, None)。
+    """
+    resp = requests.get(
+        BASE_URL + path,
+        headers={"Authorization": "Bearer " + token},
+        params=params,
+        timeout=TIMEOUT,
+    )
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None, (resp.status_code, "平台返回非 JSON 响应（HTTP %s）" % resp.status_code)
+    if resp.status_code == 401:
+        return None, (401, "登录已失效，请重新登录")
+    if resp.status_code != 200:
+        return None, (resp.status_code,
+                      _extract_msg(payload) or "HTTP %s" % resp.status_code)
+    if isinstance(payload, dict) and payload.get("code", 0) != 0:
+        return None, (payload.get("code"),
+                      _extract_msg(payload) or "平台返回业务错误")
+    return (payload.get("data") if isinstance(payload, dict) else payload), None
 
 
 def load_task_center_cache():
@@ -296,7 +354,7 @@ def _iter_task_all_pages(token):
     total = None
     seen = 0
     while True:
-        data, err = _api_get(
+        data, err = _tc_get(
             "/api/v1/collect/task/all",
             token,
             params={"page_num": page_num, "page_size": TASK_CENTER_PAGE_SIZE},
@@ -306,7 +364,7 @@ def _iter_task_all_pages(token):
                 raise TaskCenterError(
                     "当前账号无任务中心访问权限（40001 Not Authorized），"
                     "请联系管理员开通后重试", True)
-            raise TaskCenterError("拉取任务列表失败：%s" % err)
+            raise TaskCenterError("拉取任务列表失败：%s" % err[1])
         if not isinstance(data, dict) or not isinstance(data.get("list"), list):
             raise TaskCenterError("拉取任务列表失败：平台返回格式异常")
         items = data["list"]
@@ -332,12 +390,16 @@ def _iter_task_all(token):
 
 
 def _fetch_jobs(token, task_id):
-    """分页拉某任务的全部作业，返回作业列表（40001 由上层识别处理）。"""
+    """分页拉某任务的全部作业，返回作业列表。
+
+    40001 账号级无权限由上层识别终止；40401/40005 资源级不可见（当前采集员
+    无权查看该任务）静默返回空列表，不产生噪音警告。
+    """
     jobs = []
     page_num = 1
     total = None
     while True:
-        data, err = _api_get(
+        data, err = _tc_get(
             "/api/v1/collect/task/job",
             token,
             params={"task_id": task_id,
@@ -349,7 +411,9 @@ def _fetch_jobs(token, task_id):
                 raise TaskCenterError(
                     "当前账号无任务中心访问权限（40001 Not Authorized），"
                     "请联系管理员开通后重试", True)
-            raise TaskCenterError("拉取任务 %s 的作业失败：%s" % (task_id, err))
+            if _is_invisible(err):
+                return []
+            raise TaskCenterError("拉取任务 %s 的作业失败：%s" % (task_id, err[1]))
         if not isinstance(data, dict) or not isinstance(data.get("list"), list):
             raise TaskCenterError("拉取任务 %s 的作业失败：平台返回格式异常" % task_id)
         items = data["list"]
@@ -366,7 +430,7 @@ def _fetch_jobs(token, task_id):
 
 def _fetch_device_type_name(token, task_id):
     """取任务详情中的设备型号名；失败返回 None。"""
-    data, err = _api_get(
+    data, err = _tc_get(
         "/api/v1/collect/task/detail",
         token,
         params={"task_id": task_id},
@@ -376,6 +440,7 @@ def _fetch_device_type_name(token, task_id):
             raise TaskCenterError(
                 "当前账号无任务中心访问权限（40001 Not Authorized），"
                 "请联系管理员开通后重试", True)
+        # 40401/40005 资源级不可见与其他失败一样置空；可选字段，不产生警告。
         return None
     if isinstance(data, dict):
         name = data.get("device_type_name")
@@ -399,7 +464,7 @@ def _enrich_local_jobs(token, scan_result, jobs_index, warnings):
     for uuid in targets:
         job = jobs_index[uuid]
         try:
-            data, err = _api_get(
+            data, err = _tc_get(
                 "/api/v1/collect/task/job/assignment/stat",
                 token,
                 params={"job_id": job["job_id"]},
@@ -409,9 +474,13 @@ def _enrich_local_jobs(token, scan_result, jobs_index, warnings):
                     raise TaskCenterError(
                         "当前账号无任务中心访问权限（40001 Not Authorized），"
                         "请联系管理员开通后重试", True)
-                warnings.append(
-                    "作业 %s 采集人信息获取失败：%s" % (job["job_id"], err))
-                job["collectors"] = []
+                if _is_invisible(err):
+                    job["collectors"] = []
+                else:
+                    _add_warning(
+                        warnings,
+                        "作业 %s 采集人信息获取失败：%s" % (job["job_id"], err[1]))
+                    job["collectors"] = []
             else:
                 names = []
                 entries = data.get("list") if isinstance(data, dict) else None
@@ -421,8 +490,8 @@ def _enrich_local_jobs(token, scan_result, jobs_index, warnings):
                         names.append(name)
                 job["collectors"] = names
         except requests.RequestException as exc:
-            warnings.append("作业 %s 采集人信息获取失败：%s"
-                            % (job["job_id"], _network_error(exc)))
+            _add_warning(warnings, "作业 %s 采集人信息获取失败：%s"
+                         % (job["job_id"], _network_error(exc)))
             job["collectors"] = []
 
     # 云端回传状态：job/episodes 按 EPISODE_BATCH 分批
@@ -430,7 +499,7 @@ def _enrich_local_jobs(token, scan_result, jobs_index, warnings):
         batch = targets[start:start + EPISODE_BATCH]
         id_to_uuid = {str(jobs_index[uuid]["job_id"]): uuid for uuid in batch}
         try:
-            data, err = _api_get(
+            data, err = _tc_get(
                 "/api/v1/collect/task/job/episodes",
                 token,
                 params={"job_ids": json.dumps([int(jid) for jid in id_to_uuid])},
@@ -440,8 +509,8 @@ def _enrich_local_jobs(token, scan_result, jobs_index, warnings):
                     raise TaskCenterError(
                         "当前账号无任务中心访问权限（40001 Not Authorized），"
                         "请联系管理员开通后重试", True)
-                warnings.append("云端 episode 状态获取失败（%d 个作业）：%s"
-                                % (len(batch), err))
+                _add_warning(warnings, "云端 episode 状态获取失败（%d 个作业）：%s"
+                             % (len(batch), err[1]))
                 for uuid in batch:
                     jobs_index[uuid]["cloud_status"] = "unknown"
             else:
@@ -454,8 +523,8 @@ def _enrich_local_jobs(token, scan_result, jobs_index, warnings):
                     else:
                         jobs_index[uuid]["cloud_status"] = "not_uploaded"
         except requests.RequestException as exc:
-            warnings.append("云端 episode 状态获取失败（%d 个作业）：%s"
-                            % (len(batch), _network_error(exc)))
+            _add_warning(warnings, "云端 episode 状态获取失败（%d 个作业）：%s"
+                         % (len(batch), _network_error(exc)))
             for uuid in batch:
                 jobs_index[uuid]["cloud_status"] = "unknown"
 
@@ -511,23 +580,21 @@ def sync_task_center(scan_result):
                 task_id = task["id"]
                 task_name = task.get("name")
                 try:
+                    # 可选字段：40401/40005 不可见或其他失败一律静默置空。
                     device_type_name = _fetch_device_type_name(token, task_id)
                 except TaskCenterError:
                     raise
                 except requests.RequestException as exc:
-                    warnings.append("任务 %s 详情获取失败：%s"
-                                    % (task_id, _network_error(exc)))
+                    _add_warning(warnings, "任务 %s 详情获取失败：%s"
+                                 % (task_id, _network_error(exc)))
                     device_type_name = None
-                if device_type_name is None:
-                    warnings.append("任务 %s（%s）设备型号获取失败，已置空"
-                                    % (task_id, task_name))
                 try:
                     remote_jobs = _fetch_jobs(token, task_id)
                 except TaskCenterError:
                     raise
                 except requests.RequestException as exc:
-                    warnings.append("任务 %s（%s）作业拉取失败：%s"
-                                    % (task_id, task_name, _network_error(exc)))
+                    _add_warning(warnings, "任务 %s（%s）作业拉取失败：%s"
+                                 % (task_id, task_name, _network_error(exc)))
                     continue
                 tasks_scanned += 1
                 for job in remote_jobs:
@@ -785,7 +852,7 @@ def platform_status():
             "synced_at": tc_cache.get("synced_at"),
             "dates": list(tc_cache.get("dates") or []),
             "jobs_count": len(tc_cache.get("jobs") or {}),
-            "last_warning": tc_warnings[-1] if tc_warnings else None,
+            "last_warning": tc_warnings[0] if tc_warnings else None,
         }
     else:
         result["task_center"] = {
